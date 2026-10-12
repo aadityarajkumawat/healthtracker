@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Next.js Starter",
-  description: "A fresh start for your next idea, built with Next.js.",
+  title: "Pace — Calorie & Weight Tracker",
+  description: "Food and weight tracking built for life in motion.",
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",
