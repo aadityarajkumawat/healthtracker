@@ -6,8 +6,10 @@ type Unit = "piece" | "gram" | "ounce" | "pound" | "cup" | "serving";
 type Food = { id: string; name: string; emoji: string; calories: number; unit: Unit; amount: number };
 type Log = Food & { logId: string; quantity: number; date: string };
 type Weight = { id: string; value: number; date: string };
+type TrackerData = { foods: Food[]; logs: Log[]; weights: Weight[]; goal: number };
 type Tab = "today" | "inventory" | "progress";
-type Sheet = "food" | "new-food" | "weight" | null;
+type Sheet = "food" | "new-food" | "weight" | "username" | null;
+type SyncStatus = "idle" | "loading" | "saving" | "saved" | "offline";
 
 const starterFoods: Food[] = [
   { id: "egg", name: "Boiled egg", emoji: "🥚", calories: 78, unit: "piece", amount: 1 },
@@ -58,6 +60,10 @@ export default function Home() {
   const [weights, setWeights] = useState<Weight[]>([]);
   const [goal, setGoal] = useState(2200);
   const [ready, setReady] = useState(false);
+  const [cloudReady, setCloudReady] = useState(false);
+  const [username, setUsername] = useState("");
+  const [usernameError, setUsernameError] = useState("");
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>("idle");
   const [sheet, setSheet] = useState<Sheet>(null);
   const [selected, setSelected] = useState<Food | null>(null);
   const [quantity, setQuantity] = useState(1);
@@ -65,12 +71,63 @@ export default function Home() {
 
   useEffect(() => {
     setFoods(read("pace-foods", starterFoods)); setLogs(read("pace-logs", []));
-    setWeights(read("pace-weights", [])); setGoal(read("pace-goal", 2200)); setReady(true);
+    setWeights(read("pace-weights", [])); setGoal(read("pace-goal", 2200));
+    const savedUsername = localStorage.getItem("pace-username") || "";
+    if (savedUsername) setUsername(savedUsername); else setSheet("username");
+    setReady(true);
   }, []);
   useEffect(() => { if (ready) localStorage.setItem("pace-foods", JSON.stringify(foods)); }, [foods, ready]);
   useEffect(() => { if (ready) localStorage.setItem("pace-logs", JSON.stringify(logs)); }, [logs, ready]);
   useEffect(() => { if (ready) localStorage.setItem("pace-weights", JSON.stringify(weights)); }, [weights, ready]);
   useEffect(() => { if (ready) localStorage.setItem("pace-goal", JSON.stringify(goal)); }, [goal, ready]);
+
+  useEffect(() => {
+    if (!ready || !username) return;
+    let cancelled = false;
+    setCloudReady(false); setSyncStatus("loading");
+
+    async function loadTracker() {
+      try {
+        const response = await fetch(`/api/tracker/${encodeURIComponent(username)}`, { cache: "no-store" });
+        if (!response.ok) throw new Error("Cloud storage unavailable");
+        const result = await response.json();
+        if (cancelled) return;
+        if (result.exists && result.data) {
+          const data = result.data as TrackerData;
+          setFoods(data.foods); setLogs(data.logs); setWeights(data.weights); setGoal(data.goal);
+          setCloudReady(true); setSyncStatus("saved");
+        } else {
+          const create = await fetch(`/api/tracker/${encodeURIComponent(username)}`, {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ foods, logs, weights, goal }),
+          });
+          if (!create.ok) throw new Error("Cloud storage unavailable");
+          if (!cancelled) { setCloudReady(true); setSyncStatus("saved"); }
+        }
+      } catch {
+        if (!cancelled) setSyncStatus("offline");
+      }
+    }
+    loadTracker();
+    return () => { cancelled = true; };
+    // Loading should run only when the selected username changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, username]);
+
+  useEffect(() => {
+    if (!cloudReady || !username) return;
+    setSyncStatus("saving");
+    const timeout = window.setTimeout(async () => {
+      try {
+        const response = await fetch(`/api/tracker/${encodeURIComponent(username)}`, {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ foods, logs, weights, goal }),
+        });
+        setSyncStatus(response.ok ? "saved" : "offline");
+      } catch { setSyncStatus("offline"); }
+    }, 550);
+    return () => window.clearTimeout(timeout);
+  }, [foods, logs, weights, goal, cloudReady, username]);
 
   const dayLogs = logs.filter((entry) => entry.date === date);
   const eaten = dayLogs.reduce((total, entry) => total + caloriesFor(entry, entry.quantity), 0);
@@ -100,6 +157,15 @@ export default function Home() {
     if (value <= 0) return;
     setWeights((current) => [...current.filter((entry) => entry.date !== weightDate), { id: id(), value, date: weightDate }]); setSheet(null);
   }
+  function chooseUsername(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const value = String(new FormData(event.currentTarget).get("username") || "").trim().toLowerCase();
+    if (!/^[a-z0-9_-]{3,32}$/.test(value)) { setUsernameError("Use 3–32 letters, numbers, _ or -."); return; }
+    setUsernameError(""); localStorage.setItem("pace-username", value); setCloudReady(false); setUsername(value); setSheet(null);
+  }
+
+  const initials = username ? username.slice(0, 2).toUpperCase() : "?";
+  const syncLabel = syncStatus === "loading" ? "Loading" : syncStatus === "saving" ? "Saving" : syncStatus === "saved" ? "Synced" : syncStatus === "offline" ? "Local only" : "";
 
   return <main className="min-h-dvh bg-city pb-24 text-ink md:pl-20 md:pb-0">
     <aside className="fixed inset-y-0 left-0 z-30 hidden w-20 flex-col items-center border-r border-ink/10 bg-[#f8faf5] py-6 md:flex">
@@ -109,7 +175,7 @@ export default function Home() {
         <RailButton active={tab === "inventory"} title="Inventory" onClick={() => setTab("inventory")}>{icons.box}</RailButton>
         <RailButton active={tab === "progress"} title="Progress" onClick={() => setTab("progress")}>{icons.chart}</RailButton>
       </nav>
-      <div className="grid size-9 place-items-center rounded-full bg-[#dbe8ce] text-[10px] font-black">AK</div>
+      <button onClick={() => setSheet("username")} title="Switch username" className="grid size-9 place-items-center rounded-full bg-[#dbe8ce] text-[10px] font-black">{initials}</button>
     </aside>
 
     <div className="mx-auto max-w-6xl px-4 sm:px-6 md:px-10 lg:px-14">
@@ -119,8 +185,9 @@ export default function Home() {
           <p className="mb-1 text-[10px] font-black uppercase tracking-[.18em] text-ink/45">Built for the pace</p>
           <h1 className="font-display text-[36px] leading-none tracking-[-.045em] md:text-5xl">{tab === "today" ? "Keep moving." : tab === "inventory" ? "Your go-to fuel." : "Momentum, measured."}</h1>
         </div>
-        <div className="mt-1 grid size-10 place-items-center rounded-full bg-[#dbe8ce] text-[10px] font-black md:hidden">AK</div>
+        <button onClick={() => setSheet("username")} aria-label="Switch username" className="mt-1 grid size-10 place-items-center rounded-full bg-[#dbe8ce] text-[10px] font-black md:hidden">{initials}</button>
       </header>
+      {username && <button onClick={() => setSheet("username")} className="-mt-4 mb-5 flex items-center gap-2 text-[10px] font-bold text-ink/45 md:-mt-7 md:mb-7"><span className={`size-1.5 rounded-full ${syncStatus === "offline" ? "bg-orange-500" : syncStatus === "saved" ? "bg-green-600" : "bg-ink/25"}`} />@{username} · {syncLabel}</button>}
 
       {tab === "today" && <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_300px] lg:gap-7">
         <section>
@@ -174,14 +241,15 @@ export default function Home() {
       {(["today", "inventory", "progress"] as Tab[]).map((item) => <button key={item} onClick={() => setTab(item)} className={`flex flex-col items-center justify-center gap-1 text-[9px] font-bold capitalize ${tab === item ? "text-ink" : "text-ink/40"}`}><span className={tab === item ? "rounded-xl bg-[#e4efd8] px-3 py-1" : "px-3 py-1"}>{item === "today" ? icons.home : item === "inventory" ? icons.box : icons.chart}</span>{item}</button>)}
     </nav>
 
-    {sheet && <div className="fixed inset-0 z-50 flex items-end justify-center bg-[#0b1b13]/60 pt-10 backdrop-blur-sm md:items-center md:p-8" onMouseDown={(event) => { if (event.currentTarget === event.target) setSheet(null); }}>
+    {sheet && <div className="fixed inset-0 z-50 flex items-end justify-center bg-[#0b1b13]/60 pt-10 backdrop-blur-sm md:items-center md:p-8" onMouseDown={(event) => { if (event.currentTarget === event.target && sheet !== "username") setSheet(null); }}>
       <section role="dialog" aria-modal="true" className="sheet-enter hide-scrollbar relative max-h-[calc(100dvh-28px)] w-full max-w-xl overflow-y-auto rounded-t-[28px] bg-[#f8faf5] px-5 pb-[max(28px,env(safe-area-inset-bottom))] pt-9 shadow-2xl md:max-h-[calc(100dvh-64px)] md:rounded-[28px] md:p-9">
-        <div className="absolute left-1/2 top-2.5 h-1 w-11 -translate-x-1/2 rounded-full bg-ink/15 md:hidden" /><button onClick={() => setSheet(null)} className="absolute right-5 top-5 grid size-9 place-items-center rounded-full bg-ink/5" aria-label="Close">{icons.close}</button>
+        <div className="absolute left-1/2 top-2.5 h-1 w-11 -translate-x-1/2 rounded-full bg-ink/15 md:hidden" />{(sheet !== "username" || username) && <button onClick={() => setSheet(null)} className="absolute right-5 top-5 grid size-9 place-items-center rounded-full bg-ink/5" aria-label="Close">{icons.close}</button>}
         {sheet === "food" && <div><p className="mb-1 text-[10px] font-black uppercase tracking-[.16em] text-ink/45">Add to {dateName}</p><h2 className="mb-6 pr-12 font-display text-3xl tracking-[-.04em]">{selected ? selected.name : "What did you eat?"}</h2>
           {!selected ? <><label className="mb-3 flex h-12 items-center gap-2.5 rounded-2xl border border-ink/10 bg-white px-4 text-ink/35">{icons.search}<input autoFocus className="min-w-0 flex-1 bg-transparent text-sm text-ink outline-none" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search inventory" /></label><div className="grid gap-2">{shownFoods.map((food) => <button key={food.id} onClick={() => { setSelected(food); setQuantity(food.amount); }} className="flex items-center gap-3 rounded-2xl border border-ink/10 bg-white p-3 text-left"><span className="grid size-11 place-items-center rounded-xl bg-[#f0f3eb] text-2xl">{food.emoji}</span><span className="flex-1"><strong className="block text-sm">{food.name}</strong><small className="text-[10px] text-ink/40">{food.calories} kcal per {perLabel(food)}</small></span>{icons.chevron}</button>)}</div></> : <div className="grid gap-5"><div className="flex items-center gap-3 rounded-2xl border border-ink/10 bg-white p-3"><span className="grid size-14 place-items-center rounded-2xl bg-[#f0f3eb] text-3xl">{selected.emoji}</span><span><b className="block text-sm">{selected.calories} calories</b><small className="text-[10px] text-ink/40">per {perLabel(selected)}</small></span></div><label><span className={label}>How much?</span><div className="flex h-15 items-center rounded-2xl border border-ink/15 bg-white px-4"><input className="min-w-0 flex-1 bg-transparent font-display text-3xl outline-none" type="number" min="0.01" step="any" value={quantity} onChange={(event) => setQuantity(Number(event.target.value))} /><span className="text-xs text-ink/45">{selected.unit}{quantity !== 1 ? "s" : ""}</span></div></label><div className="flex justify-between border-t border-ink/10 pt-4 text-sm"><span>Total</span><strong className="font-display text-xl font-normal">{caloriesFor(selected, quantity)} kcal</strong></div><button onClick={addToLog} className="h-13 rounded-2xl bg-ink text-sm font-black text-white">Add to day</button><button onClick={() => setSelected(null)} className="text-xs font-bold text-ink/55">Choose a different food</button></div>}
         </div>}
         {sheet === "new-food" && <form onSubmit={addFood}><p className="mb-1 text-[10px] font-black uppercase tracking-[.16em] text-ink/45">Stock your shortcuts</p><h2 className="mb-6 font-display text-3xl tracking-[-.04em]">Add an inventory item</h2><div className="grid gap-4"><div className="grid grid-cols-[76px_1fr] gap-3"><label><span className={label}>Emoji</span><input name="emoji" defaultValue="🥡" maxLength={4} className={`${input} text-center text-xl`} /></label><label><span className={label}>Food name</span><input name="name" placeholder="Greek yogurt" className={input} required /></label></div><div className="grid grid-cols-2 gap-3"><label><span className={label}>Calories</span><input name="calories" type="number" min="1" placeholder="120" className={input} required /></label><label><span className={label}>Per amount</span><input name="amount" type="number" min="0.01" step="any" defaultValue="1" className={input} required /></label></div><label><span className={label}>Unit</span><select name="unit" className={input} defaultValue="piece"><option value="piece">Piece</option><option value="gram">Gram</option><option value="ounce">Ounce</option><option value="pound">Pound</option><option value="cup">Cup</option><option value="serving">Serving</option></select></label><button type="submit" className="mt-2 h-13 rounded-2xl bg-ink text-sm font-black text-white">Save to inventory</button></div></form>}
         {sheet === "weight" && <form onSubmit={addWeight}><p className="mb-1 text-[10px] font-black uppercase tracking-[.16em] text-ink/45">Keep the signal</p><h2 className="mb-6 font-display text-3xl tracking-[-.04em]">Log your weight</h2><div className="grid gap-4"><label><span className={label}>Weight (lb)</span><input autoFocus name="weight" type="number" min="1" step="0.1" placeholder={latestWeight ? String(latestWeight.value) : "165.0"} className={`${input} font-display text-2xl`} required /></label><label><span className={label}>Date</span><input name="date" type="date" defaultValue={localDate()} max={localDate()} className={input} required /></label><button type="submit" className="mt-2 h-13 rounded-2xl bg-ink text-sm font-black text-white">Save check-in</button></div></form>}
+        {sheet === "username" && <form onSubmit={chooseUsername}><p className="mb-1 text-[10px] font-black uppercase tracking-[.16em] text-ink/45">Your tracker, everywhere</p><h2 className="mb-3 font-display text-3xl tracking-[-.04em]">What&apos;s your username?</h2><p className="mb-6 text-sm leading-6 text-ink/55">Enter an existing username to load it, or choose a new one to start fresh. We&apos;ll remember it on this device.</p><label><span className={label}>Username</span><div className="flex h-14 items-center rounded-2xl border border-ink/15 bg-white px-4 focus-within:border-moss focus-within:ring-4 focus-within:ring-moss/10"><span className="text-ink/35">@</span><input autoFocus name="username" defaultValue={username} className="min-w-0 flex-1 bg-transparent px-1 text-base font-bold lowercase outline-none" placeholder="yourname" autoComplete="username" /></div></label>{usernameError && <p className="mt-2 text-xs font-bold text-red-700">{usernameError}</p>}<button type="submit" className="mt-5 h-13 w-full rounded-2xl bg-ink text-sm font-black text-white">Open my tracker</button><p className="mt-4 text-center text-[10px] leading-4 text-ink/40">No password: anyone who knows this username can access its data.</p></form>}
       </section>
     </div>}
   </main>;
